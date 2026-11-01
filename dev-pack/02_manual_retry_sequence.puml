@@ -1,0 +1,50 @@
+@startuml
+hide footbox
+autonumber
+actor User
+participant "Web Retry Button\nor CLI" as UI
+participant "CommandRuntime" as CMD
+participant "RetryCoordinator" as RC
+participant "Agent.runMaintenance" as Maint
+participant "RetryState Projection" as State
+participant "Agent Inbox" as Inbox
+participant "ReactLoopAgent" as Loop
+participant "Session Log" as Log
+participant "dsh-llm-retry" as Auto
+
+User -> UI : /retry or click Retry (targetTurn=N)
+UI -> CMD : commands.execute(sessionId, line, [])
+CMD -> Log : append command/run (log-only)
+CMD -> RC : handler(agent, rawInput)
+RC -> Maint : runMaintenance(task)
+activate Maint
+Maint -> State : stateOf(agent.session)
+State --> Maint : latest turn, endSeq, reason, risk
+alt busy, stale, ineligible, or unknown side effects
+  Maint --> RC : {kind:error, text:reason}
+else eligible and no pending inbox work
+  Maint -> Inbox : followup(resume user-role message)
+  note right of Inbox
+  source.kind = manual-retry
+  targetTurn, targetEndSeq
+  Original prompt is NOT re-emitted.
+  end note
+  Inbox -> Log : append agent/inbox/spliced
+  Maint --> RC : {kind:success, text:queued}
+end
+ deactivate Maint
+RC --> CMD : CommandResult
+CMD -> Log : append command/done (log-only)
+CMD --> UI : Remote result
+opt accepted continuation
+  Inbox -> Loop : wakeDriver after maintenance settles
+  Loop -> Log : append turn/start + step/start
+  Loop -> Log : append user/message (resume source)
+  Loop -> Loop : deriveMessages() including prior results
+  loop subsequent LLM request failures within Step
+    Loop -> Auto : agent/request-error
+    Auto --> Loop : {kind:retry} if policy allows
+  end
+  Loop -> Log : assistant/message, tool results, turn/end
+end
+@enduml

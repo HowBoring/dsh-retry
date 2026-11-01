@@ -1,0 +1,20 @@
+@startuml
+hide empty description
+[*] --> None
+None --> Executing : turn/start
+Executing --> Eligible : turn/end(error/user-aborted)\n[admitted work and no unsafe outcome]
+Executing --> Blocked : turn/end(...)[ineligible/unsafe]
+Eligible --> Queued : /retry [target matches, idle, inbox empty]\nfollowup(resume)
+Eligible --> Executing : unrelated turn/start\n(invalidates old target)
+Eligible --> Eligible : pending input exists\n[Host rejects retry]
+Eligible --> Eligible : command/run/done only (non-surface)
+Queued --> Executing : next turn/start
+Executing --> None : turn/end(completed)
+Blocked --> Executing : new user turn/start
+Blocked --> None : session reset / no eligible turn
+None --> None : command events
+note right of Eligible
+Eligibility is a projection of the latest
+completed turn; no historical arbitrary replays.
+end note
+@enduml

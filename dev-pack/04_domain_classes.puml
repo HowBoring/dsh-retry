@@ -1,0 +1,56 @@
+@startuml
+skinparam classAttributeIconSize 0
+skinparam linetype ortho
+hide empty members
+
+class RetryCoordinator {
+  +request(agent: Agent, expectedTurn?: int): Promise<CommandResult>
+  -verify(state: RetryState, agent: Agent): RetryDecision
+  -createResumeMessage(state: RetryState): UserMessage
+}
+
+class RetryStateProjection <<projection>> {
+  +key: string
+  +stateVersion: int
+  +apply(state: RetryState, event: SessionEvent): RetryState
+  +stateOf(session: Session): RetryState
+}
+
+class RetryState <<value object>> {
+  +turn: int
+  +endSeq: int?
+  +reason: string?
+  +admittedWork: boolean
+  +unsafeToolOutcome: boolean
+}
+
+class RetryDecision <<value object>> {
+  +eligible: boolean
+  +reason: string?
+}
+
+interface Agent {
+  +status: AgentStatus
+  +inbox: Inbox
+  +session: Session
+  +runMaintenance(task): Promise<T>
+  +followup(message: UserMessage): void
+}
+
+class RetryCommand <<adapter>> {
+  +register(ctx: Context): void
+}
+
+class RetryButton <<client>> {
+  +turn: int
+  +execute(sessionId: SessionId, targetTurn: int): Promise<void>
+}
+
+RetryCommand --> RetryCoordinator
+RetryButton ..> RetryCommand : remote.commands.execute("/retry")
+RetryCoordinator --> RetryStateProjection
+RetryCoordinator --> RetryDecision
+RetryStateProjection --> RetryState
+RetryCoordinator --> Agent
+Agent --> Session
+@enduml

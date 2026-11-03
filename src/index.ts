@@ -33,6 +33,8 @@ interface ClosedTurn {
   readonly endSeq: number
   readonly refusal: string | null
   readonly target: ContinuationTarget | null
+  readonly queued: boolean
+  readonly shown: (ContinuationTarget & { readonly queued: boolean }) | null
 }
 
 interface RetryState {
@@ -78,6 +80,8 @@ const stateSchema = z.object({
     endSeq: z.number(),
     refusal: z.string().nullable(),
     target: targetSchema.nullable(),
+    queued: z.boolean(),
+    shown: targetSchema.extend({ queued: z.boolean() }).nullable(),
   }).nullable(),
 })
 
@@ -92,8 +96,8 @@ interface ProjectionRegistry {
     init: () => RetryState
     apply: (state: RetryState, event: SessionEvent) => RetryState
     wire: {
-      viewSchema: z.ZodType<ContinuationTarget | null>
-      view: (state: RetryState) => ContinuationTarget | null
+      viewSchema: z.ZodType<(ContinuationTarget & { queued: boolean }) | null>
+      view: (state: RetryState) => (ContinuationTarget & { queued: boolean }) | null
     }
   }): () => void
   stateOf(session: Agent['session'], key: 'retry'): RetryState | undefined
@@ -107,13 +111,13 @@ function projections(ctx: Context): ProjectionRegistry {
 export function apply(ctx: Context): void {
   projections(ctx).register({
     key: 'retry',
-    stateVersion: 1,
+    stateVersion: 2,
     stateSchema,
     init: () => ({ open: null, closed: null }),
     apply: fold,
     wire: {
-      viewSchema: targetSchema.nullable(),
-      view: (state) => state.closed?.target ?? null,
+      viewSchema: targetSchema.extend({ queued: z.boolean() }).nullable(),
+      view: (state) => state.closed?.shown ?? null,
     },
   })
   ctx.commands.register({
@@ -145,6 +149,7 @@ function admit(ctx: Context, invocation: CommandInvocation, signal: AbortSignal)
   const target = closed?.target ?? null
   if (named !== 'latest' && target?.turn !== named) return refuse(NAMED_MISS)
   if (!target) return refuse(closed?.refusal ?? NO_TARGET)
+  if (closed?.queued) return refuse(WAITING)
   agent.followup(createUserMessage({
     content: [{ type: 'text', text: target.reason === 'user-aborted' ? ABORT_TEXT : FAILURE_TEXT }],
     source: { kind: 'manual-retry', turn: target.turn, endSeq: target.endSeq },
@@ -169,6 +174,7 @@ function refuse(text: string): CommandResult {
 }
 
 function fold(state: RetryState, event: SessionEvent): RetryState {
+  if (event.type === 'agent/inbox/spliced') return reserve(state, event.data.inserted)
   if (event.type === 'turn/start') {
     return { open: { turn: event.data.turn, committed: false, unsafe: false, pending: [] }, closed: null }
   }
@@ -199,14 +205,28 @@ function fold(state: RetryState, event: SessionEvent): RetryState {
   return { open: null, closed: closeTurn(open, event) }
 }
 
+function reserve(state: RetryState, inserted: readonly { source: { kind: string, turn?: number, endSeq?: number } }[]): RetryState {
+  const closed = state.closed
+  const target = closed?.target
+  if (!closed || !target || closed.queued) return state
+  const matched = inserted.some((message) => message.source.kind === 'manual-retry' && message.source.turn === target.turn && message.source.endSeq === target.endSeq)
+  if (!matched) return state
+  return { ...state, closed: { ...closed, queued: true, shown: { ...target, queued: true } } }
+}
+
 function closeTurn(open: OpenTurn, event: SessionEvent<'turn/end'>): ClosedTurn {
   const endSeq = Number(event.seq)
-  if (open.unsafe || open.pending.length > 0) return { turn: open.turn, endSeq, refusal: UNSAFE, target: null }
+  if (open.unsafe || open.pending.length > 0) return closed(open.turn, endSeq, UNSAFE, null)
   const ending = endingRefusal(event.data.reason)
-  if (ending) return { turn: open.turn, endSeq, refusal: ending, target: null }
-  if (!open.committed) return { turn: open.turn, endSeq, refusal: NO_COMMITTED, target: null }
+  if (ending) return closed(open.turn, endSeq, ending, null)
+  if (!open.committed) return closed(open.turn, endSeq, NO_COMMITTED, null)
   const reason = event.data.reason.kind === 'aborted' ? 'user-aborted' as const : 'error' as const
-  return { turn: open.turn, endSeq, refusal: null, target: { turn: open.turn, endSeq, reason } }
+  const target = { turn: open.turn, endSeq, reason }
+  return closed(open.turn, endSeq, null, target)
+}
+
+function closed(turn: number, endSeq: number, refusal: string | null, target: ContinuationTarget | null): ClosedTurn {
+  return { turn, endSeq, refusal, target, queued: false, shown: target ? { ...target, queued: false } : null }
 }
 
 function endingRefusal(reason: SessionEvent<'turn/end'>['data']['reason']): string | null {

@@ -339,6 +339,25 @@ test('a busy agent is refused before a Resume message is queued', async () => {
   })
 })
 
+test('a claimed Resume message still reserves that turn', async () => {
+  await withAgent(async (agent) => {
+    failedTurn(agent)
+    const end = agent.session.snapshotEvents().find((event) => event.type === 'turn/end')
+    assert.ok(end)
+    agent.session.append('agent/inbox/spliced', {
+      target: 'next-turn',
+      start: 0,
+      inserted: [createUserMessage({
+        content: [{ type: 'text', text: FAILURE_TEXT }],
+        source: { kind: 'manual-retry', turn: 1, endSeq: Number(end.seq) },
+      })],
+    })
+    const execution = await run(agent)
+    assert.deepEqual(execution?.result, { kind: 'error', text: 'A message is already waiting. Continue was not queued.' })
+    assert.equal(resumeMessages(agent).length, 1)
+  })
+})
+
 test('a second activation does not queue another Resume message', async () => {
   await withAgent(async (agent) => {
     failedTurn(agent)

@@ -1,0 +1,3 @@
+- insert:
+    - id: retry
+      name: dsh-retry
